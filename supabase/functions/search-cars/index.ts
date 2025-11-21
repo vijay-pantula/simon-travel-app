@@ -1,87 +1,102 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-
-const AMADEUS_CLIENT_ID = Deno.env.get('AMADEUS_CLIENT_ID')
-const AMADEUS_CLIENT_SECRET = Deno.env.get('AMADEUS_CLIENT_SECRET')
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
 const corsHeaders = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
+};
+
+interface CarSearchRequest {
+  cityCode: string;
+  pickupDate: string;
+  dropoffDate: string;
 }
 
-serve(async (req) => {
-    if (req.method === 'OPTIONS') {
-        return new Response('ok', { headers: corsHeaders })
+interface AmadeusTokenResponse {
+  access_token: string;
+  expires_in: number;
+}
+
+const AMADEUS_API_KEY = "T3B4dlPssGYLmFn2jZelGsJfHoml2M4G";
+const AMADEUS_API_SECRET = "QivjJfRcjA1GO9Yq";
+
+Deno.serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, {
+      status: 200,
+      headers: corsHeaders,
+    });
+  }
+
+  try {
+    const searchParams: CarSearchRequest = await req.json();
+
+    const tokenResponse = await fetch(
+      "https://test.api.amadeus.com/v1/security/oauth2/token",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          grant_type: "client_credentials",
+          client_id: AMADEUS_API_KEY,
+          client_secret: AMADEUS_API_SECRET,
+        }),
+      }
+    );
+
+    if (!tokenResponse.ok) {
+      const errorText = await tokenResponse.text();
+      console.error("Amadeus auth error:", errorText);
+      throw new Error("Failed to authenticate with Amadeus API");
     }
 
-    try {
-        const { cityCode, pickupDate, dropoffDate } = await req.json()
+    const tokenData: AmadeusTokenResponse = await tokenResponse.json();
 
-        // 1. Get Amadeus Access Token
-        const authResponse = await fetch('https://test.api.amadeus.com/v1/security/oauth2/token', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: `grant_type=client_credentials&client_id=${AMADEUS_CLIENT_ID}&client_secret=${AMADEUS_CLIENT_SECRET}`,
-        })
+    const searchUrl = new URL(
+      "https://test.api.amadeus.com/v1/shopping/car-offers"
+    );
 
-        const authData = await authResponse.json()
-        const accessToken = authData.access_token
+    searchUrl.searchParams.append("pickUpLocation", searchParams.cityCode);
+    searchUrl.searchParams.append("pickUpDateTime", searchParams.pickupDate);
+    searchUrl.searchParams.append("dropOffLocation", searchParams.cityCode);
+    searchUrl.searchParams.append("dropOffDateTime", searchParams.dropoffDate);
+    searchUrl.searchParams.append("adults", "1");
 
-        if (!accessToken) {
-            throw new Error('Failed to authenticate with Amadeus')
-        }
+    const carsResponse = await fetch(searchUrl.toString(), {
+      headers: {
+        Authorization: `Bearer ${tokenData.access_token}`,
+      },
+    });
 
-        // 2. Search Car Offers
-        // Using Amadeus Shopping Car Offers API
-        // Note: In test environment, data is limited.
-        const searchUrl = new URL('https://test.api.amadeus.com/v1/shopping/transfer-offers') // Using transfer offers as a proxy for car rental in test env if car rental is restricted, or use actual car rental endpoint if available.
-        // Actually, let's use the standard Car Rental API: /v1/shopping/car-offers is deprecated in favor of v4? No, v1 is still common for test.
-        // Let's try /v1/shopping/car-offers?pickUpLocation={cityCode}
-
-        // However, for simplicity and likely success in test env, we need a valid city code.
-        // Amadeus Test API often requires specific cities like PAR, LON, NYC.
-
-        // Let's construct the URL for Car Offers
-        // https://developers.amadeus.com/self-service/category/car-rental/api-doc/car-rental-offers/api-reference
-        // GET /v1/shopping/car-offers
-
-        const params = new URLSearchParams({
-            "pickUpLocation": cityCode,
-            "pickUpDateTime": pickupDate,
-            "dropOffLocation": cityCode, // Return to same location for simplicity
-            "dropOffDateTime": dropoffDate,
-            "adults": "1"
-        });
-
-        console.log(`Searching cars for ${cityCode} from ${pickupDate} to ${dropoffDate}`);
-
-        const response = await fetch(`https://test.api.amadeus.com/v1/shopping/car-offers?${params.toString()}`, {
-            headers: {
-                'Authorization': `Bearer ${accessToken}`,
-            },
-        })
-
-        const data = await response.json()
-
-        if (!response.ok) {
-            console.error('Amadeus API Error:', data)
-            // If 400/500 from Amadeus, return empty list or specific error
-            return new Response(
-                JSON.stringify({ error: data.errors?.[0]?.detail || 'Failed to fetch car offers' }),
-                { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 400 }
-            )
-        }
-
-        return new Response(
-            JSON.stringify({ data: data.data }),
-            { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-        )
-
-    } catch (error) {
-        return new Response(
-            JSON.stringify({ error: error.message }),
-            { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }
-        )
+    if (!carsResponse.ok) {
+      const errorText = await carsResponse.text();
+      console.error("Amadeus API error:", errorText);
+      throw new Error(`Car search failed: ${carsResponse.statusText}`);
     }
-})
+
+    const carsData = await carsResponse.json();
+
+    return new Response(JSON.stringify(carsData), {
+      headers: {
+        ...corsHeaders,
+        "Content-Type": "application/json",
+      },
+    });
+  } catch (error) {
+    console.error("Error in search-cars function:", error);
+    return new Response(
+      JSON.stringify({
+        error: error instanceof Error ? error.message : "Unknown error occurred",
+      }),
+      {
+        status: 500,
+        headers: {
+          ...corsHeaders,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+  }
+});
